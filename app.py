@@ -8,7 +8,7 @@ from metric_definitions import metric_definitions
 # FUNCTIONS
 
 
-@st.cache()
+@st.cache(allow_output_mutation=True, ttl=60 * 60, max_entries=7)
 def fetch_data(resource_id):
     """
     Fetch all data from Analyze Boston for a given resource id
@@ -39,7 +39,7 @@ def fetch_data(resource_id):
     return df
 
 
-@st.cache()
+@st.cache(allow_output_mutation=True)
 def enhance_dataframe(df):
     """
     Fix datatypes and add features for the CityScore Full Metrics dataset
@@ -65,19 +65,17 @@ def enhance_dataframe(df):
     )
     df["latest_score_flag"] = df["latest_score_flag"].astype(int).astype(bool)
     # add date indicator columns
-    df["day"] = df["score_calculated_ts"].dt.date - pd.DateOffset(1)
-    df["day_start"] = df["day"]
-    df["week"] = df["score_calculated_ts"].dt.isocalendar().week
-    df["week_start"] = df["score_calculated_ts"].dt.to_period("W").dt.start_time
-    df["month"] = df["score_calculated_ts"].dt.month
-    df["month_start"] = df["score_calculated_ts"].dt.to_period("M").dt.to_timestamp()
-    df["quarter"] = df["score_calculated_ts"].dt.quarter
-    df["quarter_start"] = df["score_calculated_ts"].dt.to_period("Q").dt.to_timestamp()
-    df["year"] = df["score_calculated_ts"].dt.year
+    df["day"] = df["score_calculated_ts"].dt.date - pd.DateOffset(days=1)
+    df["week"] = df["day"].dt.to_period("W-SAT").dt.start_time - pd.DateOffset(weeks=1)
+    df["month"] = df["day"].dt.to_period("M").dt.to_timestamp() - pd.DateOffset(
+        months=1
+    )
+    df["quarter"] = df["day"].dt.to_period("Q").dt.to_timestamp() - pd.DateOffset(1)
+    df["year"] = df["day"].dt.year
     return df
 
 
-@st.cache()
+@st.cache(allow_output_mutation=True)
 def df_to_csv(df):
     return df.to_csv().encode("utf-8")
 
@@ -118,7 +116,6 @@ if menu == "Current Scores":
                 "day",
                 "day_score",
                 "week",
-                "week_start",
                 "week_score",
                 "month",
                 "month_score",
@@ -129,14 +126,62 @@ if menu == "Current Scores":
         .reset_index(drop=True)
         .sort_values(by=["metric_name"])
     )
+    current_day = df_current_scores["day"].max()
+    current_week = df_current_scores["week"].max()
+    current_month = df_current_scores["month"].max()
+    current_quarter = df_current_scores["quarter"].max()
+
+    current_day_score = df[df["day"] == current_day].day_score.mean()
+    current_week_score = df[df["week"] == current_week].week_score.mean()
+    current_month_score = df[df["month"] == current_month].month_score.mean()
+    current_quarter_score = df[df["quarter"] == current_quarter].quarter_score.mean()
+
+    df_previous_day = df[df["day"] == (current_day - pd.DateOffset(days=1))][
+        ["metric_name", "day_score", "day"]
+    ].drop_duplicates()
+    previous_day_score = df_previous_day.day_score.mean()
+    df_previous_week = df[df["week"] == (current_week - pd.DateOffset(weeks=1))][
+        ["metric_name", "week_score", "week"]
+    ].drop_duplicates()
+    previous_week_score = df_previous_week.week_score.mean()
+    df_previous_month = df[df["month"] == (current_month - pd.DateOffset(months=1))][
+        ["metric_name", "month_score", "month"]
+    ].drop_duplicates()
+    previous_month_score = df_previous_month.month_score.mean()
+    df_previous_quarter = df[
+        df["quarter"] == (current_quarter - pd.DateOffset(months=3))
+    ][["metric_name", "quarter_score", "quarter"]].drop_duplicates()
+    previous_quarter_score = df_previous_quarter.quarter_score.mean()
+
     with st.container():
-        col1, col2, col3, col4 = st.columns([2, 2, 1, 1])
-        col1.metric("Day", df_current_scores["day"].max().strftime("%b %d, %Y"))
-        col2.metric(
-            "Week of", df_current_scores["week_start"].max().strftime("%b %d, %Y")
+        st.markdown(
+            "Note: Scores correspond to these date periods (the previous day, week, month, quarter)"
         )
-        col3.metric("Month", df_current_scores["month"].max().astype(str))
-        col4.metric("Quarter", df_current_scores["quarter"].max().astype(str))
+        col1, col2, col3, col4 = st.columns([2, 2, 1, 1])
+        col1.metric("Day", current_day.strftime("%b %d, %Y"))
+        col2.metric("Week of", current_week.strftime("%b %d, %Y"))
+        col3.metric("Month", current_month.month)
+        col4.metric("Quarter", current_quarter.quarter)
+        col1.metric(
+            "Avg Score",
+            round(current_day_score, 2),
+            round(current_day_score - previous_day_score, 2),
+        )
+        col2.metric(
+            "Avg Score",
+            round(current_week_score, 2),
+            round(current_week_score - previous_week_score, 2),
+        )
+        col3.metric(
+            "Avg Score",
+            round(current_month_score, 2),
+            round(current_month_score - previous_month_score, 2),
+        )
+        col4.metric(
+            "Avg Score",
+            round(current_quarter_score, 2),
+            round(current_quarter_score - previous_quarter_score, 2),
+        )
 
     df_current_scores_display = df_current_scores[
         ["metric_name", "day_score", "week_score", "month_score", "quarter_score"]
@@ -168,6 +213,7 @@ elif menu == "About the Metrics":
         """[Source: boston.gov](https://www.boston.gov/sites/default/files/file/document_files/2019/04/cityscore_metric_definitions_targets_for_website.pdf)"""
     )
     with st.sidebar:
+        st.subheader("Options")
         see_definitions = st.radio(
             "View:", ["All metric descriptions", "Some metric descriptions"]
         )
@@ -201,30 +247,46 @@ elif menu == "About the Metrics":
         .reset_index(drop=True)
     )
     metric_info["metric_name_pretty"] = metric_info["metric_name"].map(prettify_names)
-    # metric_info.to_json()
+    metric_info = metric_info.set_index("metric_name")
     if see_definitions == "All metric descriptions":
         for metric in metric_definitions:
-            st.subheader(metric["metric_pretty"])
+            st.markdown(f"#### {metric['metric_pretty']}")
             st.markdown(metric["metric_description"])
             m = metric["metric_name"]
+            with st.container():
+                col1, col2 = st.columns([1, 8])
+            metric_logic = metric_info.loc[m, "metric_logic"]
+            metric_target = metric_info.loc[m, "target"]
+            col1.metric("Target", metric_target)
+            col2.markdown("###### Metric Logic")
+            col2.markdown(metric_logic)
     elif see_definitions == "Some metric descriptions":
         choose_metric_definition = st.multiselect("Choose metrics:", metric_pretty_list)
         for metric in metric_definitions:
             if metric["metric_pretty"] in choose_metric_definition:
-                st.subheader(metric["metric_pretty"])
+                st.markdown(f"#### {metric['metric_pretty']}")
                 st.markdown(metric["metric_description"])
+                m = metric["metric_name"]
+                with st.container():
+                    col1, col2 = st.columns([1, 8])
+                metric_logic = metric_info.loc[m, "metric_logic"]
+                metric_target = metric_info.loc[m, "target"]
+                col1.metric("Target", metric_target)
+                col2.markdown("###### Metric Logic")
+                col2.markdown(metric_logic)
 elif menu == "Historical Scores":
     with st.sidebar:
+        st.subheader("Options")
         time_unit = st.radio("Choose a time unit", ["day", "week", "month", "quarter"])
         metric_selected = st.selectbox("Choose a metric", metric_pretty_list)
         show_data = st.checkbox("Show the data")
-    trimmed_df = df[["metric_name", f"{time_unit}_start", f"{time_unit}_score"]]
+    trimmed_df = df[["metric_name", f"{time_unit}", f"{time_unit}_score"]]
     trimmed_df["metric_name"] = trimmed_df["metric_name"].map(prettify_names)
     trimmed_df = trimmed_df[trimmed_df["metric_name"] == metric_selected]
-    trimmed_df = trimmed_df.drop_duplicates().sort_values(by=[f"{time_unit}_start"])
+    trimmed_df = trimmed_df.drop_duplicates().sort_values(by=[f"{time_unit}"])
     fig = px.line(
         trimmed_df,
-        x=f"{time_unit}_start",
+        x=f"{time_unit}",
         y=f"{time_unit}_score",
         title=f"{time_unit.capitalize()} Score for {metric_selected}",
     )
